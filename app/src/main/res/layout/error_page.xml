@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <data>
+
+        <import type="androidx.paging.LoadState" />
+
+        <import type="android.view.View" />
+
+        <variable
+            name="state"
+            type="LoadState" />
+    </data>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <Button
+            android:id="@+id/btn_retry"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="重试"
+            android:visibility="@{state instanceof LoadState.Error?View.VISIBLE:View.GONE}" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="暂无数据"
+            android:visibility="@{state instanceof LoadState.NotLoading?View.VISIBLE:View.GONE,default=gone}" />
+    </FrameLayout>
+</layout>
