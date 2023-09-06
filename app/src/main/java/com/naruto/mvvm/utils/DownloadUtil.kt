@@ -3,18 +3,14 @@ package com.naruto.mvvm.http
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import android.util.SparseArray
 import androidx.datastore.preferences.core.longPreferencesKey
 import com.naruto.mvvm.utils.CommonDataStore
 import com.naruto.mvvm.utils.FileUtil
 import com.naruto.mvvm.utils.LogUtils
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
-import okhttp3.MediaType
-import okhttp3.Response
 import okhttp3.ResponseBody
-import okio.BufferedSource
-import okio.ForwardingSource
+import okhttp3.internal.http2.StreamResetException
 import okio.Source
 import okio.buffer
 import retrofit2.http.GET
@@ -31,23 +27,12 @@ import java.net.SocketException
  * @Note
  */
 object DownloadUtil {
-
-    @JvmStatic
-    fun createDownloadResponse(response: Response, listener: DownloadListener): Response {
-        return response.newBuilder()
-            .body(DownloadResponseBody(response.body!!, listener))
-            .build()
-    }
-
     /**
      * 根据存储位置和下载链接生成对应的DataStoreKey，用于存储下载进度
      */
     private fun getDataStoreKey(fileRelativePath: String, url: String): String {
         return "$fileRelativePath($url)"
     }
-
-    @JvmStatic
-    fun getDownloadListener(id: Int): DownloadListener? = downloadListenerMap[id]
 
     /**
      * 下载
@@ -94,8 +79,7 @@ object DownloadUtil {
             MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ? ", arrayOf("$fileName%")
         )
         FileUtil.getFilesInExternalPublicSpace(
-            FileUtil.MediaType.DOWNLOAD, fileRelativePath, filter, { mediaData -> mediaData },
-            { list ->
+            FileUtil.MediaType.DOWNLOAD, fileRelativePath, filter, { it }, { list ->
                 if (list.isEmpty()) callback(null, 0, false)
                 else {
                     list.forEach { data ->
@@ -117,10 +101,7 @@ object DownloadUtil {
     }
 }
 
-const val HEADER_KEY: String = "DownloadListenerId"
 private val api by lazy { APIFactory.getFileApi(Api::class.java) }
-
-private val downloadListenerMap: SparseArray<DownloadListener> by lazy { SparseArray() }
 
 /**
  * 执行下载
@@ -130,19 +111,12 @@ private fun doDownload(
     startPos: Long,       //下载开始位置，即之前的下载进度，用于实现断点续传
     downloadListener: DownloadListener
 ) {
-    val listenerId = addDownloadListener(downloadListener)
     downloadListener.httpJob = coroutineScope.launch(Dispatchers.IO) {
         kotlin.runCatching {
-            api.downloadFile("bytes=$startPos-", "$listenerId", url)!!
+            api.downloadFile("bytes=$startPos-", url)!!
         }.onSuccess { writeDataToFile(it, fileRelativePath, downloadListener) }
             .onFailure { downloadListener.onError(it) }
-    }
-}
-
-private fun addDownloadListener(listener: DownloadListener): Int {
-    val id = listener.hashCode()
-    downloadListenerMap.put(id, listener)
-    return id
+    }.also { downloadListener.onStart(it) }
 }
 
 /**
@@ -178,9 +152,13 @@ private fun writeDataToFile(responseBody: ResponseBody, downloadListener: Downlo
         if (!downloadListener.onReady(responseBody.contentLength()))
             throw ResourceChangedException()
         val buffer = ByteArray(1024 * 4)
+        var len: Int
+//        val stream = object : ForwardingSource(responseBody.source()) {}.buffer().inputStream()
+        //这里必须调用的是Source.buffer()而不是BufferedSource.buffer()
+        val stream = (responseBody.source() as Source).buffer().inputStream()
         while (true) {
             downloadListener.httpJob!!.ensureActive()
-            val len = responseBody.byteStream().read(buffer)
+            len = stream.read(buffer)
             if (len == -1) break//下载完毕
             outputStream.write(buffer, 0, len)
             downloadListener.onReadBytes(len.toLong())//更新进度
@@ -189,46 +167,13 @@ private fun writeDataToFile(responseBody: ResponseBody, downloadListener: Downlo
         if (it == null) {
             FileUtil.rename(uri, downloadListener.fileName)
             downloadListener.onComplete(uri!!)
-        } else {
-            when (it) {
-                is SocketException, is CancellationException -> downloadListener.onCancel()
-                is ResourceChangedException -> {
-                    downloadListener.onResourceChanged()
-                }
-                else -> downloadListener.onError(Throwable("写入文件失败"))
-            }
+        } else when (it) {
+            is SocketException, is CancellationException -> downloadListener.onCancel()
+            is ResourceChangedException -> downloadListener.onResourceChanged()
+            is StreamResetException -> downloadListener.onError(it)
+            else -> downloadListener.onError(Throwable("写入文件失败:${it.message}"))
         }
     })
-}
-
-private fun removeDownloadListener(listener: DownloadListener) {
-    downloadListenerMap.remove(listener.hashCode())
-}
-
-
-/**
- * @Description ResponseBody
- * @Author Naruto Yang
- * @CreateDate 2021/11/19 0019
- * @Note
- */
-private class DownloadResponseBody(
-    private val responseBody: ResponseBody, listener: DownloadListener
-) : ResponseBody() {
-    init {
-        listener.onStart(listener.httpJob!!)
-    }
-
-    private val bufferedSource: BufferedSource by lazy { getSource(responseBody.source()).buffer() }
-
-    override fun contentLength(): Long = responseBody.contentLength()
-
-    override fun contentType(): MediaType? = responseBody.contentType()
-
-    override fun source(): BufferedSource = bufferedSource
-
-    private fun getSource(source: Source): Source = object : ForwardingSource(source) {}
-
 }
 
 /**
@@ -279,9 +224,11 @@ abstract class DownloadListener {
         onProgress(downloadedBytes, totalBytes)
     }
 
-    open fun onStart(httpJob: Job) {}
+    open fun onStart(httpJob: Job) {
+        LogUtils.i("--->onStart")
+    }
+
     open fun onComplete(uri: Uri) {
-        removeDownloadListener(this)
         CoroutineScope(Dispatchers.IO).launch {
             CommonDataStore.remove(longPreferencesKey(dataStoreKey))
         }
@@ -292,7 +239,6 @@ abstract class DownloadListener {
         if (hasCancelled) return//防止执行多次
         hasCancelled = true
         LogUtils.i("--->downloadedBytes=$downloadedBytes")
-        removeDownloadListener(this)
     }
 
     open fun onResourceChanged() {
@@ -309,9 +255,12 @@ abstract class DownloadListener {
         }
     }
 
-/*    open fun onPause() {}
-    open fun onResume() {}*/
-    open fun onError(throwable: Throwable) = removeDownloadListener(this)
+    /*    open fun onPause() {}
+        open fun onResume() {}*/
+    open fun onError(throwable: Throwable) {
+        throwable.printStackTrace()
+    }
+
     abstract fun onProgress(downloadedBytes: Long, totalBytes: Long)
 
     data class ParamCache(
@@ -326,11 +275,7 @@ private interface Api {
      */
     @Streaming
     @GET
-    suspend fun downloadFile(
-        @Header("Range") range: String,
-        @Header(HEADER_KEY) downloadListenerId: String,
-        @Url url: String
-    ): ResponseBody?
+    suspend fun downloadFile(@Header("Range") range: String, @Url url: String): ResponseBody?
 }
 
 /**

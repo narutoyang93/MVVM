@@ -186,7 +186,7 @@ object FileUtil {
      * @param extension
      * @return
      */
-    fun getMimeTypeFromExtension(extension: String?): String? {
+    fun getMimeTypeFromExtension(extension: String): String? {
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension).also {
             LogUtils.i("--->extension=$extension;MimeType=$it")
         }

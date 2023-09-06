@@ -12,9 +12,13 @@ import com.naruto.mvvm.databinding.ActivityDownloadBinding
 import com.naruto.mvvm.http.DownloadListener
 import com.naruto.mvvm.http.DownloadUtil
 import com.naruto.mvvm.setMyOnClickListener
+import com.naruto.mvvm.utils.DialogFactory
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Locale
+
 /**
  * @Description 下载示例（断点续传）
  * @Author Naruto Yang
@@ -26,6 +30,16 @@ class DownloadActivity : MVVMActivity<ActivityDownloadBinding, DownloadActivity.
     override fun init() {
         dataBinding.btn.setMyOnClickListener { viewModel.downloadFile() }
         dataBinding.btnCancel.setMyOnClickListener { viewModel.cancel() }
+        viewModel.result.observe(this) {
+            when (it) {
+                is VM.Result.Failure -> DialogFactory
+                    .makeSimpleDialog(this, R.layout.dialog_hint, "下载失败", it.throwable.message)
+                    .show()
+
+                is VM.Result.Success -> MyApplication.toast("下载完毕")
+                else -> {}
+            }
+        }
     }
 
     override fun getLayoutRes() = R.layout.activity_download
@@ -38,6 +52,7 @@ class DownloadActivity : MVVMActivity<ActivityDownloadBinding, DownloadActivity.
      * @Note
      */
     class VM : ViewModel() {
+        private val sdf = SimpleDateFormat("yyyy_dd_MM_HH_mm_ss", Locale.getDefault())
         private lateinit var httpJob: Job
         private val _label = MutableLiveData("下载")
         val label: LiveData<String>
@@ -46,6 +61,10 @@ class DownloadActivity : MVVMActivity<ActivityDownloadBinding, DownloadActivity.
         private val _status = MutableLiveData(Status.Ready)
         val status: LiveData<Status>
             get() = _status
+
+        private var _result = MutableLiveData<Result>(null)
+        val result: LiveData<Result>
+            get() = _result
 
         private val _downloadProgress = MutableLiveData(0)
         val downloadProgress: LiveData<Int>
@@ -67,37 +86,52 @@ class DownloadActivity : MVVMActivity<ActivityDownloadBinding, DownloadActivity.
         }
 
         fun downloadFile() {
-            DownloadUtil.download(viewModelScope, "",
-                "http://210.21.9.132:61112/collection_V2.5.6.apk", object : DownloadListener() {
-                    override fun onStart(httpJob: Job) {
-                        super.onStart(httpJob)
-                        this@VM.httpJob = httpJob
-                        viewModelScope.launch { changeStatus(Status.Downloading) }
-                    }
+            val kuGouApp =
+                "https://packagebssdlbig.kugou.com/Android/KugouPlayer/11709/KugouPlayer_201_V11.7.0.apk"
+            DownloadUtil.download(viewModelScope, "", kuGouApp, object : DownloadListener() {
+                override fun onStart(httpJob: Job) {
+                    super.onStart(httpJob)
+                    this@VM.httpJob = httpJob
+                    viewModelScope.launch { changeStatus(Status.Downloading) }
+                }
 
-                    override fun onProgress(downloadedBytes: Long, totalBytes: Long) {
-                        (downloadedBytes.toFloat() / totalBytes * 100).let {
+                override fun onProgress(downloadedBytes: Long, totalBytes: Long) {
+                    (downloadedBytes.toFloat() / totalBytes * 100).let {
 //                            LogUtils.i("--->downloadedBytes=$downloadedBytes;totalBytes=$totalBytes;progress=$it")
-                            viewModelScope.launch {
-                                _downloadProgress.value = it.toInt()
-                                _label.value = "已下载 " + if (totalBytes <= 0L) "0.0%"
-                                else String.format("%.1f%%", it)
-                            }
-                        }
-                    }
-
-                    override fun onComplete(uri: Uri) {
-                        super.onComplete(uri)
                         viewModelScope.launch {
-                            MyApplication.toast("下载完毕")
-                            changeStatus(Status.Ready)
+                            _downloadProgress.value = it.toInt()
+                            _label.value = "已下载 " + if (totalBytes <= 0L) "0.0%"
+                            else String.format("%.1f%%", it)
                         }
                     }
-                })
+                }
+
+                override fun onComplete(uri: Uri) {
+                    super.onComplete(uri)
+                    onFinish(Result.Success(uri, fileName))
+                }
+
+                override fun onError(throwable: Throwable) {
+                    super.onError(throwable)
+                    onFinish(Result.Failure(throwable))
+                }
+
+                fun onFinish(result: Result) {
+                    viewModelScope.launch {
+                        changeStatus(Status.Ready)
+                        _result.value = result
+                    }
+                }
+            })
         }
 
         enum class Status {
             Ready, Downloading, Unknown
+        }
+
+        sealed class Result {
+            class Success(val uri: Uri, val fileName: String) : Result()
+            class Failure(val throwable: Throwable) : Result()
         }
     }
 }
