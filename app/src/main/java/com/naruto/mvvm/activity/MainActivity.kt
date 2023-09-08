@@ -11,6 +11,7 @@ class MainActivity : DataBindingActivity<ActivityMainBinding>() {
     override fun init() {
         val list = listOf(
             Item("断点续传", DownloadActivity::class.java),
+            Item("上传文件", UploadActivity::class.java),
             Item("分页列表", PagingListActivity::class.java)
         )
         dataBinding.lv.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, list)
